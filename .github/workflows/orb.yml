@@ -1,0 +1,54 @@
+name: ORB bot
+
+# GitHub's schedule is in UTC. Two entries per run cover both daylight time (now until Nov 1)
+# and standard time; the bot itself checks New York time and exits from the entry that doesn't apply.
+on:
+  schedule:
+    - cron: "40 12 * * 1-5"   # morning run (8:40 AM New York in daylight time)
+    - cron: "40 13 * * 1-5"   # morning run (8:40 AM New York in standard time)
+    - cron: "5 15-19 * * 1-5" # hourly stop checks
+    - cron: "35 19 * * 1-5"   # close run (3:35 PM New York in daylight time)
+    - cron: "35 20 * * 1-5"   # close run (3:35 PM New York in standard time)
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "check = test the setup (places no orders)"
+        type: choice
+        options: [check, morning, stops, close]
+        default: check
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    concurrency:
+      group: orb-${{ github.event_name == 'workflow_dispatch' && inputs.mode || (github.event.schedule == '5 15-19 * * 1-5' && 'stops' || ((github.event.schedule == '35 19 * * 1-5' || github.event.schedule == '35 20 * * 1-5') && 'close' || 'morning')) }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Pick mode
+        id: mode
+        run: |
+          case "${{ github.event.schedule }}" in
+            "5 15-19 * * 1-5") m=stops ;;
+            "35 19 * * 1-5"|"35 20 * * 1-5") m=close ;;
+            "40 12 * * 1-5"|"40 13 * * 1-5") m=morning ;;
+            *) m="${{ inputs.mode }}" ;;
+          esac
+          echo "mode=${m:-check}" >> "$GITHUB_OUTPUT"
+          echo "Running mode: ${m:-check}"
+      - name: Run bot
+        run: python bot.py --mode ${{ steps.mode.outputs.mode }}
+        env:
+          ALPACA_KEY: ${{ secrets.ALPACA_KEY }}
+          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          ALPACA_PAPER: "true"
