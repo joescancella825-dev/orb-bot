@@ -18,7 +18,7 @@ on:
         default: check
 
 permissions:
-  contents: read
+  contents: write   # lets the bot save its daily log file (logs/) so Claude can read an exact copy
 
 jobs:
   run:
@@ -34,6 +34,10 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install -r requirements.txt
+      - name: Set up git for the log file
+        run: |
+          git config user.name "orb-bot"
+          git config user.email "orb-bot@users.noreply.github.com"
       - name: Pick mode
         id: mode
         run: |
