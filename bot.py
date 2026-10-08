@@ -16,7 +16,7 @@ notifications and to the ORB Desk dashboard.
 Usage: python bot.py --mode morning|stops|close|check
 Needs environment variables ALPACA_KEY, ALPACA_SECRET, NTFY_TOPIC (GitHub secrets).
 """
-import json, math, os, sys, time, traceback
+import json, math, os, subprocess, sys, time, traceback
 from datetime import datetime, timedelta, date, time as dtime
 from zoneinfo import ZoneInfo
 
@@ -65,6 +65,14 @@ def chunks(xs, n):
     for i in range(0, len(xs), n):
         yield xs[i:i + n]
 
+ROUNDUP_WORDS = ("stock market today", "stocks moving", "movers", "pre-market session", "premarket session",
+                 "futures", "mid-day", "midday", "biggest stock", "top gainers", "trending stocks", "stocks to watch",
+                 "market update", "why is", "shares are trading", "stocks making", "market wrap")
+
+def is_roundup(headline):
+    h = headline.lower()
+    return any(w in h for w in ROUNDUP_WORDS)
+
 def money(x):
     return f"{'-' if x < 0 else '+'}${abs(x):,.2f}"
 
@@ -79,10 +87,11 @@ class Channel:
 
     def post(self, title, text, event=None):
         self.log(f"[{title}] {text}")
-        if not self.topic:
-            return
         body = json.dumps({"title": title, "text": text, "event": event or {"type": "info"},
                            "date": str(now().date()), "time": f"{now():%H:%M}"})
+        self.save_to_repo(body)
+        if not self.topic:
+            return
         for attempt in range(3):
             try:
                 requests.post(f"https://ntfy.sh/{self.topic}", data=body.encode("utf-8"), timeout=10)
@@ -90,6 +99,27 @@ class Channel:
             except Exception as e:
                 self.log(f"post failed ({attempt + 1}/3): {e}")
                 pause(2)
+
+    def save_to_repo(self, line):
+        """Append the update to logs/<date>.jsonl and push it, so Claude can read an exact copy."""
+        if os.getenv("GITHUB_ACTIONS") != "true":
+            return
+        path = f"logs/{now():%Y-%m-%d}.jsonl"
+        try:
+            os.makedirs("logs", exist_ok=True)
+            with open(path, "a") as f:
+                f.write(line + "\n")
+            git = lambda *a: subprocess.run(["git", *a], capture_output=True, text=True, timeout=60)
+            git("add", path)
+            git("commit", "-q", "-m", f"log {now():%Y-%m-%d %H:%M}")
+            for attempt in range(4):
+                if git("push", "-q").returncode == 0:
+                    return
+                git("pull", "-q", "--rebase")
+                pause(2)
+            self.log("could not push the log file")
+        except Exception as e:
+            self.log(f"log save failed: {e}")
 
     def today_events(self):
         """Read back today's updates (the channel keeps about 12 hours)."""
@@ -201,8 +231,11 @@ class Bot:
             return None
         items = res.data.get("news", []) if hasattr(res, "data") else res.get("news", [])
         for it in items:
-            if sym in (getattr(it, "symbols", None) or [sym]):
-                return getattr(it, "headline", "") or "news"
+            syms = getattr(it, "symbols", None) or [sym]
+            h = getattr(it, "headline", "") or ""
+            if sym not in syms or len(syms) > 3 or is_roundup(h):
+                continue          # market roundups and "stocks moving" lists don't count as a catalyst
+            return h or "news"
         return None
 
     def scan(self, uni):
